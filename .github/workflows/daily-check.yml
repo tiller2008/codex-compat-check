@@ -38,6 +38,7 @@ jobs:
           LAST="$(cat last-good.txt)"
           echo "codex=$CODEX" >> "$GITHUB_OUTPUT"
           echo "subagent=$SUB" >> "$GITHUB_OUTPUT"
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
           if [ "$LAST" = "$CODEX" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
@@ -73,15 +74,13 @@ jobs:
           secure: true
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "✅ codex ${{ steps.ver.outputs.codex }} 协议兼容，可 rebuild"
+          subject: "✅ codex ${{ steps.ver.outputs.codex }} 协议兼容，无需操作"
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |
             @openai/codex@${{ steps.ver.outputs.codex }} 与 dsh-subagent-codex@${{ steps.ver.outputs.subagent }} 的 app-server 握手通过。
 
-            可升级：生产 docker-compose.yml 设
-              DSH_CODEX_OVERRIDE_VERSION=${{ steps.ver.outputs.codex }}
-            后执行 ./rebuild.sh。
+            无需操作：容器默认跟随 latest，下次重启/rebuild 会自动用上 ${{ steps.ver.outputs.codex }}。
 
       - name: 邮件：协议不兼容 / 检测失败
         if: failure()
@@ -92,12 +91,15 @@ jobs:
           secure: true
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "❌ codex ${{ steps.ver.outputs.codex }} 检测失败，勿 rebuild"
+          subject: "❌ codex ${{ steps.ver.outputs.codex }} 检测失败，建议 pin"
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |
             针对 @openai/codex@${{ steps.ver.outputs.codex }}（subagent-codex@${{ steps.ver.outputs.subagent }}）的协议检测失败。
 
-            可能是协议不兼容，也可能是 GitHub runner 网络问题（npm 拉取失败）。
-            请先重跑一次；仍失败再看日志里哪一步是红色：
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            ⚠️ 容器默认跟随 latest，下次重启可能拉到坏版本。
+            请立即在生产 docker-compose.yml 设：
+              DSH_CODEX_OVERRIDE_VERSION=${{ steps.ver.outputs.last }}
+            冻结在上一个已知可用版本，等 subagent-codex 上游适配。
+
+            （若只是网络问题，先重跑一次；仍红再看日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}）

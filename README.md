@@ -1,7 +1,7 @@
 # codex-compat-check
 
-每天自动检查 `@openai/codex@latest` 是否仍与 `dsh-subagent-codex` 的 app-server 协议兼容，
-结果邮件通知，据此决定 rebuild 时是否把 codex override 到最新。
+每天自动检查 `@openai/codex@latest` 是否仍与 `dsh-subagent-codex` 的 app-server 协议兼容，结果邮件通知。
+容器默认「跟随 latest」，所以大多数时候无需操作；只有收到 ❌ 邮件才需手动 pin。
 
 ## 工作原理
 
@@ -28,8 +28,8 @@
 
 ## 邮件含义
 
-- ✅「协议兼容，可 rebuild」→ 在生产 `docker-compose.yml` 加 `DSH_CODEX_OVERRIDE_VERSION=<版本号>`，然后 `./rebuild.sh`。
-- ❌「检测失败，勿 rebuild」→ codex 新版协议和 subagent 对不上，**保持现状**，等 `dsh-subagent-codex` 上游适配新版。
+- ✅「协议兼容，无需操作」→ codex 新版握手通过。容器默认跟随 latest，下次重启自动用上，**无需任何手动操作**。
+- ❌「检测失败，建议 pin」→ codex 新版协议和 subagent 对不上。因为容器默认跟随 latest，请**立即**在生产 `docker-compose.yml` 设 `DSH_CODEX_OVERRIDE_VERSION=<邮件里的 last 版本>` 冻结，等 `dsh-subagent-codex` 上游适配。
 
 ## 维护注意
 
