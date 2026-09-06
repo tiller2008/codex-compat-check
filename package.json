@@ -1,0 +1,8 @@
+{
+  "name": "codex-compat-check",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Daily check: is @openai/codex@latest still app-server-protocol-compatible with dsh-subagent-codex?",
+  "license": "MIT"
+}
