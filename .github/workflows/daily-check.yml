@@ -21,8 +21,20 @@ jobs:
       - name: 解析最新版本并判断是否变化
         id: ver
         run: |
-          CODEX="$(npm view @openai/codex version)"
-          SUB="$(npm view @deepseek-ai/dsh-subagent-codex dist-tags.next)"
+          # npm view 偶发超时，重试 3 次
+          CODEX=""
+          for i in 1 2 3; do
+            CODEX="$(npm view @openai/codex version 2>/dev/null)" || CODEX=""
+            [ -n "$CODEX" ] && break
+            echo "npm view codex 第 $i 次失败，10s 后重试..."
+            sleep 10
+          done
+          if [ -z "$CODEX" ]; then
+            echo "::error::无法解析 @openai/codex 最新版本（网络问题）"
+            exit 1
+          fi
+          # subagent 版本是信息性的，失败不阻塞
+          SUB="$(npm view @deepseek-ai/dsh-subagent-codex dist-tags.next 2>/dev/null || echo unknown)"
           LAST="$(cat last-good.txt)"
           echo "codex=$CODEX" >> "$GITHUB_OUTPUT"
           echo "subagent=$SUB" >> "$GITHUB_OUTPUT"
@@ -34,7 +46,10 @@ jobs:
           echo "codex=$CODEX subagent=$SUB last-good=$LAST"
 
       - name: 安装 codex
-        run: npm install --no-save "@openai/codex@${{ steps.ver.outputs.codex }}"
+        run: |
+          npm install --no-save --fetch-retries=3 --fetch-retry-mintimeout=2000 \
+            "@openai/codex@${{ steps.ver.outputs.codex }}"
+          node -e "console.log('installed codex', require('@openai/codex/package.json').version)"
 
       - name: 跑协议探针
         run: node probe.mjs
@@ -83,5 +98,6 @@ jobs:
           body: |
             针对 @openai/codex@${{ steps.ver.outputs.codex }}（subagent-codex@${{ steps.ver.outputs.subagent }}）的协议检测失败。
 
-            请勿 rebuild，查看日志：
+            可能是协议不兼容，也可能是 GitHub runner 网络问题（npm 拉取失败）。
+            请先重跑一次；仍失败再看日志里哪一步是红色：
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
