@@ -1,4 +1,4 @@
-name: codex-compat-check
+name: subagent-compat-check
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch: {}      # 可手动触发
 
 permissions:
-  contents: write            # 允许把 last-good.txt 自动提交回仓库
+  contents: write            # 允许把 last-good-*.txt 自动提交回仓库
 
 jobs:
   check:
@@ -18,55 +18,115 @@ jobs:
         with:
           node-version: 22
 
-      - name: 解析最新版本并判断是否变化
+      - name: 解析 codex + claude 最新版本
         id: ver
         run: |
-          # npm view 偶发超时，重试 3 次
-          CODEX=""
-          for i in 1 2 3; do
-            CODEX="$(npm view @openai/codex version 2>/dev/null)" || CODEX=""
-            [ -n "$CODEX" ] && break
-            echo "npm view codex 第 $i 次失败，10s 后重试..."
-            sleep 10
-          done
+          resolve_latest() {
+            # $1 = npm 包名；npm view 偶发超时，重试 3 次
+            local pkg="$1" out=""
+            for i in 1 2 3; do
+              out="$(npm view "$pkg" version 2>/dev/null)" || out=""
+              [ -n "$out" ] && break
+              echo "npm view $pkg 第 $i 次失败，10s 后重试..."
+              sleep 10
+            done
+            echo "$out"
+          }
+
+          CODEX="$(resolve_latest @openai/codex)"
+          CLAUDE="$(resolve_latest @anthropic-ai/claude-agent-sdk)"
           if [ -z "$CODEX" ]; then
             echo "::error::无法解析 @openai/codex 最新版本（网络问题）"
             exit 1
           fi
-          # subagent 版本是信息性的，失败不阻塞
-          SUB="$(npm view @deepseek-ai/dsh-subagent-codex dist-tags.next 2>/dev/null || echo unknown)"
-          LAST="$(cat last-good.txt)"
-          echo "codex=$CODEX" >> "$GITHUB_OUTPUT"
-          echo "subagent=$SUB" >> "$GITHUB_OUTPUT"
-          echo "last=$LAST" >> "$GITHUB_OUTPUT"
-          if [ "$LAST" = "$CODEX" ]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+          if [ -z "$CLAUDE" ]; then
+            echo "::error::无法解析 @anthropic-ai/claude-agent-sdk 最新版本（网络问题）"
+            exit 1
           fi
-          echo "codex=$CODEX subagent=$SUB last-good=$LAST"
 
-      - name: 安装 codex
+          # subagent 版本是信息性的，失败不阻塞
+          SUB_CODEX="$(npm view @deepseek-ai/dsh-subagent-codex dist-tags.next 2>/dev/null || echo unknown)"
+          SUB_CLAUDE="$(npm view @deepseek-ai/dsh-subagent-claude-code dist-tags.next 2>/dev/null || echo unknown)"
+
+          # 各自独立的 last-good 基线。codex 兼容旧的 last-good.txt（0.153.4）作为迁移起点。
+          LAST_CODEX="$(cat last-good-codex.txt 2>/dev/null || cat last-good.txt 2>/dev/null || echo 0.149.1)"
+          LAST_CLAUDE="$(cat last-good-claude.txt 2>/dev/null || echo 0.3.241)"
+
+          # 各自独立判断「是否变化」，互不影响
+          if [ "$LAST_CODEX" = "$CODEX" ]; then
+            echo "codex_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "codex_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$LAST_CLAUDE" = "$CLAUDE" ]; then
+            echo "claude_changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "claude_changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "codex=$CODEX" >> "$GITHUB_OUTPUT"
+          echo "claude=$CLAUDE" >> "$GITHUB_OUTPUT"
+          echo "sub_codex=$SUB_CODEX" >> "$GITHUB_OUTPUT"
+          echo "sub_claude=$SUB_CLAUDE" >> "$GITHUB_OUTPUT"
+          echo "last_codex=$LAST_CODEX" >> "$GITHUB_OUTPUT"
+          echo "last_claude=$LAST_CLAUDE" >> "$GITHUB_OUTPUT"
+          echo "codex=$CODEX claude=$CLAUDE last_codex=$LAST_CODEX last_claude=$LAST_CLAUDE"
+
+      - name: 安装 codex + claude SDK
         run: |
           npm install --no-save --fetch-retries=3 --fetch-retry-mintimeout=2000 \
-            "@openai/codex@${{ steps.ver.outputs.codex }}"
-          node -e "console.log('installed codex', require('@openai/codex/package.json').version)"
+            "@openai/codex@${{ steps.ver.outputs.codex }}" \
+            "@anthropic-ai/claude-agent-sdk@${{ steps.ver.outputs.claude }}"
+          node -e "console.log('installed codex', JSON.parse(require('fs').readFileSync(require.resolve('@openai/codex/package.json'))).version)"
+          node -e "console.log('installed claude sdk', JSON.parse(require('fs').readFileSync(require.resolve('@anthropic-ai/claude-agent-sdk').replace(/sdk\.mjs$/,'package.json'))).version)"
 
-      - name: 跑协议探针
+      # codex 探针：continue-on-error，失败不阻断 claude 探针
+      - name: 跑 codex 协议探针
+        id: codex-probe
+        continue-on-error: true
         run: node probe.mjs
 
-      - name: 记录已验证版本
-        if: success() && steps.ver.outputs.changed == 'true'
+      # claude 探针：continue-on-error，与 codex 完全独立
+      - name: 跑 claude SDK 探针
+        id: claude-probe
+        continue-on-error: true
+        run: node probe-claude.mjs
+
+      # 各自独立记录 last-good：codex 通过就更新 codex，claude 通过就更新 claude，
+      # 一个失败不影响另一个的版本推进。
+      - name: 记录各自已验证版本
+        if: always()
         run: |
-          echo "${{ steps.ver.outputs.codex }}" > last-good.txt
+          echo "codex probe outcome = ${{ steps.codex-probe.outcome }}"
+          echo "claude probe outcome = ${{ steps.claude-probe.outcome }}"
+
+          if [ "${{ steps.codex-probe.outcome }}" = "success" ]; then
+            echo "${{ steps.ver.outputs.codex }}" > last-good-codex.txt
+            echo "  已更新 last-good-codex.txt -> ${{ steps.ver.outputs.codex }}"
+          else
+            echo "  codex 探针失败，保持 last-good-codex.txt = ${{ steps.ver.outputs.last_codex }}"
+          fi
+
+          if [ "${{ steps.claude-probe.outcome }}" = "success" ]; then
+            echo "${{ steps.ver.outputs.claude }}" > last-good-claude.txt
+            echo "  已更新 last-good-claude.txt -> ${{ steps.ver.outputs.claude }}"
+          else
+            echo "  claude 探针失败，保持 last-good-claude.txt = ${{ steps.ver.outputs.last_claude }}"
+          fi
+
+          # 有变更才 commit
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add last-good.txt
-          git commit -m "chore: codex ${{ steps.ver.outputs.codex }} 协议验证通过" || echo "无变更"
-          git push
+          git add last-good-codex.txt last-good-claude.txt 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "  无版本变更，跳过 commit"
+          else
+            git commit -m "chore: 兼容验证更新 codex=${{ steps.ver.outputs.codex }} claude=${{ steps.ver.outputs.claude }}" || echo "无变更"
+            git push
+          fi
 
-      - name: 邮件：新版本验证通过
-        if: success() && steps.ver.outputs.changed == 'true'
+      - name: 邮件：全部通过
+        if: steps.codex-probe.outcome == 'success' && steps.claude-probe.outcome == 'success'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_HOST }}
@@ -74,16 +134,17 @@ jobs:
           secure: true
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "✅ codex ${{ steps.ver.outputs.codex }} 协议兼容，无需操作"
+          subject: "✅ codex ${{ steps.ver.outputs.codex }} / claude ${{ steps.ver.outputs.claude }} 兼容，无需操作"
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |
-            @openai/codex@${{ steps.ver.outputs.codex }} 与 dsh-subagent-codex@${{ steps.ver.outputs.subagent }} 的 app-server 握手通过。
+            @openai/codex@${{ steps.ver.outputs.codex }}（subagent-codex@${{ steps.ver.outputs.sub_codex }}）协议握手通过。
+            @anthropic-ai/claude-agent-sdk@${{ steps.ver.outputs.claude }}（subagent-claude-code@${{ steps.ver.outputs.sub_claude }}）SDK 契约面通过。
 
-            无需操作：容器默认跟随 latest，下次重启/rebuild 会自动用上 ${{ steps.ver.outputs.codex }}。
+            无需操作：容器默认跟随 latest，下次重启/rebuild 会自动用上新版本。
 
-      - name: 邮件：协议不兼容 / 检测失败
-        if: failure()
+      - name: 邮件：任一不兼容 / 检测失败
+        if: steps.codex-probe.outcome == 'failure' || steps.claude-probe.outcome == 'failure'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_HOST }}
@@ -91,15 +152,18 @@ jobs:
           secure: true
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "❌ codex ${{ steps.ver.outputs.codex }} 检测失败，建议 pin"
+          subject: "❌ codex/claude 兼容检测有失败，需检查"
           to: ${{ secrets.MAIL_TO }}
           from: ${{ secrets.MAIL_FROM }}
           body: |
-            针对 @openai/codex@${{ steps.ver.outputs.codex }}（subagent-codex@${{ steps.ver.outputs.subagent }}）的协议检测失败。
+            本次检测结果：
+            - codex 探针：${{ steps.codex-probe.outcome }}（@openai/codex@${{ steps.ver.outputs.codex }}）
+            - claude 探针：${{ steps.claude-probe.outcome }}（@anthropic-ai/claude-agent-sdk@${{ steps.ver.outputs.claude }}）
 
-            ⚠️ 容器默认跟随 latest，下次重启可能拉到坏版本。
-            请立即在生产 docker-compose.yml 设：
-              DSH_CODEX_OVERRIDE_VERSION=${{ steps.ver.outputs.last }}
-            冻结在上一个已知可用版本，等 subagent-codex 上游适配。
+            只有失败的项会保持旧版（codex last-good=${{ steps.ver.outputs.last_codex }}，claude last-good=${{ steps.ver.outputs.last_claude }}），通过的那项不受影响。
+
+            ⚠️ 若 codex 失败，请立即在生产 docker-compose.yml 设：
+              DSH_CODEX_OVERRIDE_VERSION=${{ steps.ver.outputs.last_codex }}
+            冻结 codex 到上一个已知可用版本，等 subagent-codex 上游适配。
 
             （若只是网络问题，先重跑一次；仍红再看日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}）
